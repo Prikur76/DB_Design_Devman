@@ -73,7 +73,7 @@ class EducationThread(models.Model):
 
     class Meta:
         verbose_name = 'образовательный поток'
-        verbose_name = 'образовательные потоки'
+        verbose_name_plural = 'потоки'
         
     def __str__(self):
         return self.article
