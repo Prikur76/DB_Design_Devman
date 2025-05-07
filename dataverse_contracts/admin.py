@@ -29,7 +29,7 @@ class BaseContractAdmin(admin.ModelAdmin):
 class PresenterHourlyContractAdmin(admin.ModelAdmin):
     ... 
     
-
+    
 @admin.register(AuthorContent)
 class AuthorContentAdmin(admin.ModelAdmin):
     ... 
