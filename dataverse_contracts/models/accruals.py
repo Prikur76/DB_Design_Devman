@@ -1,12 +1,10 @@
 from datetime import timedelta
 from django.utils import timezone
+from django.apps import apps
 from django.db import models
 from django.db.models import Q, DurationField, Case, When, Value, CharField
 from django.db.models.functions import Now
 from django.utils.translation import gettext_lazy as _
-
-from dataverse_contracts.models.contracts import BaseContract
-from dataverse_threads.models.users import User
 
 
 class AccrualManager(models.Manager):
@@ -91,22 +89,17 @@ class AccrualManager(models.Manager):
 
 
 class Accrual(models.Model):
-    contract = models.ForeignKey(
-        BaseContract,
-        on_delete=models.CASCADE,
-        verbose_name=_('Контракт'))
+    # contract = models.ForeignKey(
+    #     BaseContract,
+    #     on_delete=models.CASCADE,
+    #     verbose_name=_('Контракт'))
+    contract_id = models.PositiveIntegerField(_('ID контракта'))
     amount = models.DecimalField(_('Сумма'), max_digits=10, decimal_places=2)
-    currency = models.CharField(_('Валюта'), max_length=3, choices=BaseContract.CURRENCIES)
     confirmed_at = models.DateTimeField(
         _('Дата подтверждения'), null=True, blank=True, db_index=True)
     paid_at = models.DateTimeField(_('Дата оплаты'), null=True, blank=True)
     is_automated = models.BooleanField(_('Автоматически'), default=False)
     comment = models.TextField(_('Комментарий'), null=True, blank=True)
-    editor = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL, 
-        null=True,
-        verbose_name=_('Редактор'))
     created_at = models.DateTimeField(_('Дата создания'), auto_now_add=True)
     
     objects = AccrualManager()
@@ -116,7 +109,7 @@ class Accrual(models.Model):
         verbose_name_plural = _('Начисления')
         indexes = [
             models.Index(name='confirmed_and_paid_idx', fields=['confirmed_at', 'paid_at']),
-            models.Index(name='confirmed_contracts_idx', fields=['contract', 'confirmed_at']),
+            models.Index(name='confirmed_contracts_idx', fields=['contract_id', 'confirmed_at']),
         ]
 
     def __str__(self):
@@ -136,3 +129,19 @@ class Accrual(models.Model):
             return 'confirmed'
         else:
             return 'pending'
+        
+    def get_contract_details(self):
+        """
+        Возвращает связанный контракт через динамический импорт модели
+        """
+        # Получаем модель BaseContract
+        BaseContract = apps.get_model('dataverse_contracts', 'BaseContract')
+        
+        try:
+            contract = BaseContract.objects.get(id=self.contract_id)
+            return {
+                'contract_id': contract.contract_id,
+                'currency': contract.currency
+            }
+        except BaseContract.DoesNotExist:
+            return {"error": "Контракт не найден"}

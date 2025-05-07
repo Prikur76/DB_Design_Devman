@@ -154,7 +154,8 @@ class ThreadContractAssignment(models.Model):
     created_at = models.DateTimeField(_('Дата создания'), auto_now_add=True)
 
     class Meta:
-        verbose_name = _('прикрепление контракта к потоку')
+        verbose_name = _('контракт')
+        verbose_name_plural = _('контракты потока')
         unique_together = ('thread', 'contract')
 
     def __str__(self):

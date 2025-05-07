@@ -1,7 +1,7 @@
 from django.apps import AppConfig
 
 
-class ContractsConfig(AppConfig):
+class DataverseContractsConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
-    name = 'contracts'
-    verbose_name = 'контракты'
+    name = 'dataverse_contracts'
+    verbose_name = 'все контракты'
