@@ -45,8 +45,9 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     
     # dataverse apps
-    'contracts',
-    'threads',
+    'dataverse_staff',
+    'dataverse_contracts',
+    'dataverse_threads',
 ]
 
 MIDDLEWARE = [
@@ -132,4 +133,4 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-AUTH_USER_MODEL = 'dataverse_threads.models.users.User'
+AUTH_USER_MODEL = 'dataverse_staff.User'
