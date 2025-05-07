@@ -126,7 +126,7 @@ class Contractor(models.Model):
     kpp = models.CharField(_('КПП'), max_length=9, null=True, blank=True)
     passport_data = models.JSONField(_('Паспортные данные'), null=True, blank=True)
     bank_details = models.JSONField(_('Реквизиты банка'), null=True, blank=True)
-    elba_id = models.CharField(_('ID Контур:Эльба'), max_length=50, null=True, blank=True)
+    elba_id = models.CharField(_('Контур Эльба'), max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(_('Дата создания'), auto_now_add=True)
     updated_at = models.DateTimeField(_('Дата обновления'), auto_now=True)
 
@@ -173,9 +173,9 @@ class BaseContract(models.Model):
         on_delete=models.CASCADE,
         verbose_name=_('Схема оплаты'))
     non_financial_terms = models.JSONField(_('Нефинансовые условия'), null=True, blank=True)
-    signed_at = models.DateField(_('Дата подписания'))
-    issue_at = models.DateField(_('Дата начала действия'))
-    expire_at = models.DateField(_('Дата окончания действия'))
+    signed_at = models.DateField(_('Дата подписания'), blank=True, null=True)
+    issue_at = models.DateField(_('Дата начала действия'), blank=True, null=True)
+    expire_at = models.DateField(_('Дата окончания действия'), blank=True, null=True)
     created_at = models.DateTimeField(_('Дата создания'), auto_now_add=True)
 
     objects = BaseContractManager()
@@ -240,7 +240,7 @@ class PresenterHourlyContract(models.Model):
         verbose_name = _('Контракт с ведущим (почасовой)')
         verbose_name_plural = _('Контракты с ведущими (почасовые)')
         indexes = [
-            models.Index(fields=['presenter', 'role']),
+            models.Index(name='presenter_role_idx', fields=['presenter', 'role']),
         ]
         
 
