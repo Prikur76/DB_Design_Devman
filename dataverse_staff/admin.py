@@ -10,7 +10,6 @@ from dataverse_staff.models import (
 class ContractManagerAssignmentInline(admin.TabularInline):
     model = ContractManagerAssignment
     extra=1
-    can_delete = False
     list_per_page = 10
 
 

@@ -1,6 +1,6 @@
 from django.utils import timezone
 from django.db import models
-from django.db.models import Q, F, Count, Exists, OuterRef
+from django.db.models import Q, F, Sum, Count, Case, When, Value, Exists, OuterRef, CharField
 from django.db.models.functions import Now
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils.translation import gettext_lazy as _
@@ -8,105 +8,181 @@ from django.utils.translation import gettext_lazy as _
 from dataverse_contracts.models.accruals import Accrual
 
 
-class BaseContractManager(models.Manager):
+class BaseContractQuerySet(models.QuerySet):
+    def annotate_status(self):
+        """Добавляет аннотацию 'status' для контрактов на основе текущих дат и связей."""
+        return self.annotate(
+            status=Case(
+                # Замененный договор
+                When(replaced_contract__isnull=False, then=Value('replaced')),
+                
+                # Проект договора (не подписан)
+                When(signed_at__isnull=True, then=Value('draft')),
+                
+                # Отложенный старт (подписан, но дата начала в будущем)
+                When(
+                    Q(issue_at__isnull=False) & 
+                    Q(issue_at__gt=Now().cast('date')),
+                    then=Value('suspended')
+                ),
+                
+                # Выполненный договор (истек срок действия)
+                When(
+                    Q(expire_at__isnull=False) & 
+                    Q(expire_at__lt=Now().cast('date')),
+                    then=Value('completed')
+                ),
+                
+                # Частично выполненный (пример: истек срок, но есть активные связи)
+                When(
+                    Q(expire_at__isnull=False) & 
+                    Q(expire_at__lt=Now().cast('date')) & 
+                    Q(presenterhourlycontract__hours_worked__gt=0),
+                    then=Value('partially_completed')
+                ),
+                
+                # Досрочно завершенный (например, есть дата досрочного завершения)
+                When(
+                    Q(terminated_at__isnull=False),
+                    then=Value('early_completed')
+                ),
+                
+                # Действующий договор
+                default=Value('active'),
+                output_field=CharField()
+            )
+        )
+
+    def annotate_total_hours(self):
+        """Общее количество отработанных часов по контрактам с ведущими."""
+        return self.annotate(
+            total_hours=models.Sum('presenterhourlycontract__hours_worked')
+        )
+
+    def annotate_content_count(self):
+        """Количество авторских материалов по контрактам."""
+        return self.annotate(
+            content_count=models.Count('authorcontract__authorcontent')
+        )
+
+    def annotate_payment_details(self):
+        """Аннотация деталей оплаты (например, график, валюта)."""
+        return self.annotate(
+            payment_schedule=models.F('presenterhourlycontract__payment_schedule'),
+            currency=models.F('currency')
+        )
+
     def active(self):
-        """Действующие контракты (вступили в силу и не истекли)"""
-        now = Now()
-        return self.filter(
-            issue_at__lte=now,
-            expire_at__gt=now
-        ).select_related('payment_scheme', 'replaced_contract')
+        return self.filter(status='active')
+
+    def draft(self):
+        return self.filter(status='draft')
+
+    def suspended(self):
+        return self.filter(status='suspended')
 
     def completed(self):
-        """Завершенные контракты (истекли или заменены)"""
-        now = Now()
+        return self.filter(status='completed')
+
+    def partially_completed(self):
+        return self.filter(status='partially_completed')
+
+    def early_completed(self):
+        return self.filter(status='early_completed')
+    
+    def replaced(self):
+        return self.filter(status='replaced')
+
+    def upcoming(self):
+        """Контракты с датой начала в будущем."""
+        return self.filter(issue_at__gt=models.functions.Now().cast('date'))
+
+    def current(self):
+        """Действующие контракты (дата начала <= сегодня < дата окончания)."""
         return self.filter(
-            Q(expire_at__lte=now) | Q(replaced_contract__isnull=False)
-        ).select_related('payment_scheme')
+            issue_at__lte=models.functions.Now().cast('date'),
+            expire_at__gt=models.functions.Now().cast('date')
+        )
 
-    def partially_executed(self):
-        """Контракты с частично выполненными обязательствами"""
-        return self.annotate(
-            obligations_count=Count('non_financial_terms'),
-            executed_count=Count('accruals', filter=Q(accruals__paid_at__isnull=False))
-        ).filter(
-            executed_count__lt=F('obligations_count'),
-            executed_count__gt=0
-        ).prefetch_related('accruals')
-
-    def by_status(self, status):
-        """Контракты по статусу начислений"""
+    def expired(self):
+        """Завершённые контракты."""
+        return self.filter(expire_at__lt=models.functions.Now().cast('date'))
+    
+    def expired_soon(self, days=7):
+        """Контракты, истекающие в ближайшие N дней"""
+        now = timezone.now().date()
+        end_date = now + timezone.timedelta(days=days)
         return self.filter(
-            accruals__status=status
-        ).distinct().select_related('payment_scheme')
+            expire_at__range=(now, end_date),
+            issue_at__lte=Now().cast('date')
+        )    
+    
+    def with_presenters(self):
+        """Контракты с ведущими."""
+        return self.select_related('presenterhourlycontract__presenter')
 
-    def author_contracts(self):
-        """Авторские контракты"""
-        return self.filter(
-            Exists(AuthorContract.objects.filter(contract=OuterRef('pk')))
-        ).select_related('payment_scheme')
-
-    def hourly_presenter_contracts(self):
-        """Почасовые контракты с ведущими"""
-        return self.filter(
-            Exists(PresenterHourlyContract.objects.filter(contract=OuterRef('pk')))
-        ).select_related('payment_scheme')
-
-    def by_payment_scheme(self, scheme_id):
-        """Контракты по схеме оплаты"""
-        return self.filter(payment_scheme_id=scheme_id).select_related('payment_scheme')
-
-    def by_currency(self, currency):
-        """Контракты по валюте"""
-        return self.filter(currency=currency)
-
-    def by_date_range(self, start_date, end_date):
-        """Контракты, активные в заданном диапазоне дат"""
-        return self.filter(
-            Q(issue_at__lte=end_date) & 
-            Q(expire_at__gte=start_date)
-        ).select_related('payment_scheme')
-
+    def with_authors(self):
+        """Контракты с авторами."""
+        return self.select_related('authorcontract__author')
+        
     def with_unpaid_accruals(self):
         """Контракты с непогашенными начислениями"""
+        from dataverse_contracts.models.accruals import Accrual  # Импорт внутри метода для избежания циклической зависимости
         return self.filter(
             Exists(Accrual.objects.filter(contract=OuterRef('pk'), paid_at__isnull=True))
         )
 
     def with_confirmed_accruals(self):
         """Контракты с подтвержденными начислениями"""
+        from dataverse_contracts.models.accruals import Accrual
         return self.filter(
             Exists(Accrual.objects.filter(contract=OuterRef('pk'), confirmed_at__isnull=False))
         )
-
-    def expired_soon(self, days=7):
-        """Контракты, истекающие в ближайшие N дней"""
-        now = models.functions.Now()
-        return self.filter(
-            expire_at__range=(now, now + models.DurationField(default=f'{days} days')),
-            issue_at__lte=now
-        )
-
-    def by_contractor(self, contractor_id):
-        """Контракты по контрагенту"""
-        return self.filter(
-            Q(authorcontract__author_id=contractor_id) | 
-            Q(presenterhourlycontract__presenter_id=contractor_id)
-        ).distinct().select_related('payment_scheme')
-
+    
     def by_template(self, is_template=True):
         """Фильтр по шаблону"""
         return self.filter(is_template=is_template)
+    
+    def by_period(self, start_date, end_date):
+        """Контракты, пересекающиеся с заданным периодом."""
+        return self.filter(issue_at__lte=end_date, expire_at__gte=start_date)
 
-    def annotate_payment_stats(self):
-        """Аннотировать статистику по начислениям"""
-        return self.annotate(
-            total_accruals=Count('accruals'),
-            paid_accruals=Count('accruals', filter=Q(accruals__paid_at__isnull=False)),
-            unpaid_accruals=Count('accruals', filter=Q(accruals__paid_at__isnull=True)),
-            total_amount=models.Sum('accruals__amount')
+    def by_contractor(self, contractor_id):
+        """Контракты по контрагенту с оптимизацией выборки"""
+        return self.filter(
+            Q(authorcontract__author_id=contractor_id) | 
+            Q(presenterhourlycontract__presenter_id=contractor_id)
+        ).distinct().select_related(
+            'presenterhourlycontract__presenter',
+            'authorcontract__author'
         )
 
+    def order_by_signed_date(self, ascending=True):
+        order = 'signed_at' if ascending else '-signed_at'
+        return self.order_by(order)
+
+    def order_by_expiry_date(self, ascending=True):
+        order = 'expire_at' if ascending else '-expire_at'
+        return self.order_by(order)
+
+    def order_by_status(self):
+        """Сортировка по приоритету статусов."""
+        status_order = {
+            'draft': 0,
+            'suspended': 1,
+            'active': 2,
+            'partially_completed': 3,
+            'early_completed': 4,
+            'completed': 5,
+            'replaced': 6            
+        }
+        return self.annotate(
+            status_order=models.Case(
+                *[models.When(status=k, then=Value(v)) for k, v in status_order.items()],
+                output_field=models.IntegerField()
+            )
+        ).order_by('status_order')
+        
 
 class Contractor(models.Model):
     CONTRACTOR_TYPES = (
@@ -126,7 +202,7 @@ class Contractor(models.Model):
     kpp = models.CharField(_('КПП'), max_length=9, null=True, blank=True)
     passport_data = models.JSONField(_('Паспортные данные'), null=True, blank=True)
     bank_details = models.JSONField(_('Реквизиты банка'), null=True, blank=True)
-    elba_id = models.CharField(_('Контур Эльба'), max_length=50, null=True, blank=True)
+    elba_id = models.CharField(_('ID (Контур-Эльба)'), max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(_('Дата создания'), auto_now_add=True)
     updated_at = models.DateTimeField(_('Дата обновления'), auto_now=True)
 
@@ -137,20 +213,6 @@ class Contractor(models.Model):
     def __str__(self):
         return f"{self.name} ({self.get_contractor_type_display()})"
     
-    
-class PaymentScheme(models.Model):
-    name = models.CharField(_('Название схемы'), max_length=50)
-    description = models.TextField(_('Описание схемы'))
-    parameters = models.JSONField(_('Параметры схемы'))
-    is_active = models.BooleanField(_('Активна'), default=True)
-
-    class Meta:
-        verbose_name = _('Схема оплаты')
-        verbose_name_plural = _('Схемы оплаты')
-
-    def __str__(self):
-        return self.name
-
 
 class BaseContract(models.Model):
     CURRENCIES = (
@@ -165,20 +227,19 @@ class BaseContract(models.Model):
         on_delete=models.SET_NULL, 
         null=True, blank=True,
         verbose_name=_('Замененный контракт'))
-    currency = models.CharField(_('Валюта'), max_length=3, choices=CURRENCIES)
+    currency = models.CharField(_('Валюта расчета'), max_length=3, choices=CURRENCIES)
     comment = models.TextField(_('Комментарий'))
     is_template = models.BooleanField(_('Шаблон'), default=False)
-    payment_scheme = models.ForeignKey(
-        PaymentScheme,
-        on_delete=models.CASCADE,
-        verbose_name=_('Схема оплаты'))
+    formula_parameters = models.JSONField(_('Параметры для начислений'), null=True, blank=True)
     non_financial_terms = models.JSONField(_('Нефинансовые условия'), null=True, blank=True)
     signed_at = models.DateField(_('Дата подписания'), blank=True, null=True)
     issue_at = models.DateField(_('Дата начала действия'), blank=True, null=True)
     expire_at = models.DateField(_('Дата окончания действия'), blank=True, null=True)
+    terminated_at = models.DateField(_('Дата досрочного завершения'), blank=True, null=True)
     created_at = models.DateTimeField(_('Дата создания'), auto_now_add=True)
+    updated_at = models.DateTimeField(_('Дата обновления'), auto_now=True)
 
-    objects = BaseContractManager()
+    objects = BaseContractQuerySet.as_manager()
     
     class Meta:
         verbose_name = _('Контракт')
@@ -186,23 +247,12 @@ class BaseContract(models.Model):
         indexes = [
             models.Index(name='signed_expired_idx', fields=['signed_at', 'expire_at']),
             models.Index(name='issued_expired_idx', fields=['issue_at', 'expire_at']),
-            models.Index(name='currency_payment_scheme_idx', fields=['currency', 'payment_scheme']),
             models.Index(name='replaced_contract_idx', fields=['replaced_contract'])
         ]
 
     def __str__(self):
         return f"{self.contract_id} ({self.get_currency_display()})"
     
-    @property
-    def is_active(self):
-        """Вычисляемое свойство: активен ли контракт на текущую дату"""
-        now = timezone.now().date()
-        
-        if not self.issue_at or not self.expire_at:
-            return False
-        
-        return self.issue_at <= now <= self.expire_at
-
 
 class PresenterHourlyContract(models.Model):
     PAYMENT_SCHEDULES = (
@@ -242,7 +292,6 @@ class PresenterHourlyContract(models.Model):
         indexes = [
             models.Index(name='presenter_role_idx', fields=['presenter', 'role']),
         ]
-        
 
     def __str__(self):
         return f"Контракт {self.contract.contract_id} - {self.presenter.name}"
@@ -254,10 +303,6 @@ class AuthorContract(models.Model):
         on_delete=models.CASCADE,
         primary_key=True,
         verbose_name=_('Контракт'))
-    content = models.ForeignKey(
-        'AuthorContent',
-        on_delete=models.CASCADE,
-        verbose_name=_('Авторский материал'))
     author = models.ForeignKey(
         Contractor,
         on_delete=models.CASCADE,
@@ -278,6 +323,10 @@ class AuthorContent(models.Model):
         ('article', 'Статья'),
     )
     
+    contract = models.ForeignKey(
+        AuthorContract,
+        on_delete=models.DO_NOTHING,
+        verbose_name=_('Авторский контракт'), blank=True)
     title = models.CharField(_('Название'), max_length=255)
     description = models.TextField(_('Описание'))
     content_format = models.CharField(

@@ -1,34 +1,29 @@
 from datetime import timedelta
-from django.utils import timezone
 from django.apps import apps
 from django.db import models
 from django.db.models import Q, DurationField, Case, When, Value, CharField
 from django.db.models.functions import Now
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 
-class AccrualManager(models.Manager):
+class AccrualQuerySet(models.QuerySet):
     def confirmed(self):
-        """Подтвержденные начисления"""
-        return self.filter(confirmed_at__isnull=False).select_related('contract')
+        return self.filter(confirmed_at__isnull=False)
 
     def paid(self):
-        """Оплаченные начисления"""
-        return self.filter(paid_at__isnull=False).select_related('contract')
+        return self.filter(paid_at__isnull=False)
 
     def pending(self):
-        """Ожидаемые начисления"""
         return self.filter(confirmed_at__isnull=True, paid_at__isnull=True)
 
     def overdue(self):
-        """Просроченные начисления"""
         return self.filter(
             Q(confirmed_at__lt=Now() - DurationField(default='30 days')) &
             Q(paid_at__isnull=True)
         )
-        
+
     def by_status(self, status):
-        """Фильтрация по статусу начисления"""
         status_filters = {
             'paid': Q(paid_at__isnull=False),
             'confirmed': Q(confirmed_at__isnull=False, paid_at__isnull=True),
@@ -38,13 +33,12 @@ class AccrualManager(models.Manager):
             ),
             'pending': Q(confirmed_at__isnull=True, paid_at__isnull=True)
         }
-        
+
         if status in status_filters:
-            return self.filter(status_filters[status]).select_related('contract')
+            return self.filter(status_filters[status])
         return self.none()
 
     def annotate_status(self):
-        """Аннотация статуса начисления для SQL-запросов"""
         return self.annotate(
             status_annotation=Case(
                 When(paid_at__isnull=False, then=Value('paid')),
@@ -61,31 +55,20 @@ class AccrualManager(models.Manager):
         )
 
     def by_contractor(self, contractor_id):
-        """Начисления по контрагенту"""
         return self.filter(
             Q(contract__authorcontract__author_id=contractor_id) |
             Q(contract__presenterhourlycontract__presenter_id=contractor_id)
-        ).distinct().select_related('contract')
+        ).distinct()
 
     def by_date_range(self, start_date, end_date):
-        """Начисления в заданном диапазоне дат"""
         return self.filter(
             Q(created_at__range=(start_date, end_date)) |
             Q(confirmed_at__range=(start_date, end_date)) |
             Q(paid_at__range=(start_date, end_date))
-        ).select_related('contract')
-
-    def total_amount(self):
-        """Общая сумма начислений"""
-        return self.aggregate(total=models.Sum('amount'))['total'] or 0
-
-    def average_amount(self):
-        """Средняя сумма начисления"""
-        return self.aggregate(average=models.Avg('amount'))['average'] or 0
+        )
 
     def by_currency(self, currency):
-        """Начисления по валюте"""
-        return self.filter(currency=currency).select_related('contract')
+        return self.filter(currency=currency)
 
 
 class Accrual(models.Model):
@@ -95,6 +78,7 @@ class Accrual(models.Model):
     #     verbose_name=_('Контракт'))
     contract_id = models.PositiveIntegerField(_('ID контракта'))
     amount = models.DecimalField(_('Сумма'), max_digits=10, decimal_places=2)
+    formula_parameters = models.JSONField(_('Параметры начисления'), null=True, blank=True)
     confirmed_at = models.DateTimeField(
         _('Дата подтверждения'), null=True, blank=True, db_index=True)
     paid_at = models.DateTimeField(_('Дата оплаты'), null=True, blank=True)
@@ -102,7 +86,7 @@ class Accrual(models.Model):
     comment = models.TextField(_('Комментарий'), null=True, blank=True)
     created_at = models.DateTimeField(_('Дата создания'), auto_now_add=True)
     
-    objects = AccrualManager()
+    objects = AccrualQuerySet.as_manager()
 
     class Meta:
         verbose_name = _('Начисление')

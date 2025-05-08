@@ -1,7 +1,6 @@
 from django.contrib import admin
 from dataverse_contracts.models.contracts import (
-    Contractor,
-    PaymentScheme,       
+    Contractor,   
     BaseContract, 
     PresenterHourlyContract, 
     AuthorContract,
@@ -15,10 +14,6 @@ class ContractorAdmin(admin.ModelAdmin):
     ... 
     
     
-@admin.register(PaymentScheme)
-class PaymentSchemeAdmin(admin.ModelAdmin):
-    ... 
-    
     
 @admin.register(BaseContract)
 class BaseContractAdmin(admin.ModelAdmin):
@@ -29,14 +24,16 @@ class BaseContractAdmin(admin.ModelAdmin):
 class PresenterHourlyContractAdmin(admin.ModelAdmin):
     ... 
     
-    
-@admin.register(AuthorContent)
-class AuthorContentAdmin(admin.ModelAdmin):
-    ... 
-   
+
+class AuthorContentInline(admin.TabularInline):
+    model = AuthorContent
+    extra = 0
+    list_per_page = 10 
+
    
 @admin.register(AuthorContract)
 class AuthorContractAdmin(admin.ModelAdmin):
+    inlines = [AuthorContentInline, ]
     ... 
     
     

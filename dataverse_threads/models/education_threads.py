@@ -1,6 +1,6 @@
 from django.utils import timezone
 from django.db import models
-from django.db.models import Q, Exists, OuterRef
+from django.db.models import Q,  Case, When, Value
 from django.db.models.functions import Now
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
@@ -8,80 +8,140 @@ from django.core.exceptions import ValidationError
 from dataverse_contracts.models.contracts import AuthorContent, BaseContract
 
 
-class EducationThreadManager(models.Manager):
+class EducationThreadQuerySet(models.QuerySet):
+    def annotate_status(self):
+        """Добавляет аннотацию статуса потока: active, upcoming, expired, open_start, open_end."""
+        now = Now().cast('date')  # Приведение к типу DATE для корректного сравнения
+        return self.annotate(
+            status=Case(
+                # Статус "open" — обе даты открыты
+                When(Q(is_open_start=True) & Q(is_open_end=True), then=Value('open')),
+                
+                # Статус "open_start" — только начало открыто
+                When(Q(is_open_start=True) & Q(is_open_end=False), then=Value('open_start')),
+                
+                # Статус "open_end" — только конец открыт
+                When(Q(is_open_start=False) & Q(is_open_end=True), then=Value('open_end')),
+                
+                # Статус "active" — даты заданы и поток активен
+                When(
+                    Q(is_open_start=False) &
+                    Q(is_open_end=False) &
+                    Q(start_date__lte=now) &
+                    Q(end_date__gte=now),
+                    then=Value('active')
+                ),
+                
+                # Статус "upcoming" — дата начала в будущем
+                When(
+                    Q(is_open_start=False) &
+                    Q(start_date__gt=now),
+                    then=Value('upcoming')
+                ),
+                
+                # Статус "expired" — дата окончания в прошлом
+                When(
+                    Q(is_open_end=False) &
+                    Q(end_date__lt=now),
+                    then=Value('expired')
+                ),
+                
+                # Резервный статус на случай непредвиденных условий
+                default=Value('unknown'),
+                output_field=models.CharField()
+            )
+        )
+        
     def active(self):
-        """Потоки, которые сейчас активны (на основе дат и флагов open)"""
-        now = Now()
-        return self.filter(
-            Q(
-                is_open_start=True,
-                is_open_end=True
-            ) | Q(
-                is_open_start=True,
-                end_date__gte=now
-            ) | Q(
-                is_open_end=True,
-                start_date__lte=now
-            ) | Q(
-                is_open_start=False,
-                is_open_end=False,
-                start_date__lte=now,
-                end_date__gte=now
+        return self.filter(status='active')
+
+    def upcoming(self):
+        return self.filter(status='upcoming')
+
+    def expired(self):
+        return self.filter(status='expired')
+
+    def open(self):
+        return self.filter(status='open')
+
+    def open_start(self):
+        return self.filter(status='open_start')
+
+    def open_end(self):
+        return self.filter(status='open_end')
+    
+    def annotate_contract_count(self):
+        """Количество связанных контрактов"""
+        return self.annotate(
+            contract_count=models.Count(
+                'threadcontractassignment',
+                filter=Q(threadcontractassignment__isnull=False),
+                distinct=True
             )
         )
 
-    def upcoming(self):
-        """Ближайшие потоки (будущие или с открытой датой начала)"""
-        now = Now()
-        return self.filter(
-            Q(is_open_start=True) | Q(start_date__gte=now)
-        ).select_related('author_content')
+    def annotate_duration_days(self):
+        """Аннотация длительности потока в днях"""
+        return self.annotate(
+            duration_days=models.Case(
+                When(
+                    is_open_start=False,
+                    is_open_end=False,
+                    then=models.F('end_date') - models.F('start_date')
+                ),
+                default=Value(None),
+                output_field=models.IntegerField()
+            )
+        )
+        
+    def order_by_status_priority(self):
+        """Сортировка по приоритету статусов"""
+        status_order = {
+            'active': 0,
+            'upcoming': 1,
+            'open': 2,
+            'open_start': 3,
+            'open_end': 4,
+            'expired': 5
+        }
+        return self.annotate(
+            status_order=models.Case(
+                *[models.When(status=k, then=Value(v)) for k, v in status_order.items()],
+                output_field=models.IntegerField()
+            )
+        ).order_by('status_order')
+
+    def order_by_start_date(self, ascending=True):
+        """Сортировка по дате начала"""
+        order = 'start_date' if ascending else '-start_date'
+        return self.order_by(order)
+
+    def order_by_duration(self, ascending=True):
+        """Сортировка по длительности потока"""
+        order = 'duration_days' if ascending else '-duration_days'
+        return self.annotate_duration_days().order_by(order)
+
+    def search_by_article(self, query):
+        """Поиск потоков по артикулу"""
+        return self.filter(article__icontains=query)
 
     def by_format(self, format_type):
         """Потоки по формату (bootcamp, workshop и т.д.)"""
-        return self.filter(article__icontains=format_type).select_related('article')
-
-    def by_content(self, content_id):
-        """Потоки по конкретному курсу/материалу"""
-        return self.filter(author_content_id=content_id).select_related('author_content')
+        return self.filter(article__icontains=format_type).select_related('author_content')
+    
+    def by_schedule_key(self, key):
+        """Потоки с определенным ключом в расписании"""
+        return self.filter(schedule__contains={key: True})
+    
+    def recently_created(self, days=7):
+        """Потоки, созданные за последние N дней"""
+        return self.filter(
+            created_at__gte=timezone.now() - timezone.timedelta(days=days)
+        )
 
     def auto_generated(self):
         """Потоки с автоматической генерацией расписания"""
         return self.filter(is_auto_generated=True).prefetch_related('schedule')
-
-    def with_contracts(self):
-        """Потоки с хотя бы одним связанным контрактом"""
-        return self.filter(
-            Exists(ThreadContractAssignment.objects.filter(thread=OuterRef('pk')))
-        )
-
-    def open_dates(self):
-        """Потоки с открытыми датами начала или окончания"""
-        return self.filter(
-            Q(is_open_start=True) | Q(is_open_end=True)
-        )
-
-    def by_date_range(self, start_date, end_date):
-        """Потоки в заданном диапазоне дат"""
-        return self.filter(
-            Q(
-                start_date__range=(start_date, end_date),
-                is_open_start=False
-            ) | Q(
-                is_open_start=True,
-                end_date__gte=start_date
-            )
-        ).select_related('author_content')
-
-    def recent(self, days=7):
-        """Потоки, созданные за последние N дней"""
-        return self.filter(
-            created_at__gte=Now() - models.DurationField(default=f'{days} days')
-        )
-
-    def schedule_contains(self, key):
-        """Потоки с определенным ключом в расписании"""
-        return self.filter(schedule__has_key=key)
 
 
 class EducationThread(models.Model):
@@ -100,7 +160,7 @@ class EducationThread(models.Model):
         help_text=_('JSON-формат расписания на полгода'))
     created_at = models.DateTimeField(_('Дата создания'), auto_now_add=True)
     
-    objects = EducationThreadManager()
+    objects = EducationThreadQuerySet.as_manager()
 
     class Meta:
         verbose_name = _('Образовательный поток')
@@ -124,23 +184,6 @@ class EducationThread(models.Model):
                 }
             )
         
-    @property
-    def is_active(self):
-        now = timezone.now().date()
-        
-        # Проверяем условия активности
-        if self.is_open_start and self.is_open_end:
-            return True
-        
-        if self.is_open_start:
-            return self.end_date >= now if self.end_date else True
-        
-        if self.is_open_end:
-            return self.start_date <= now if self.start_date else True
-        
-        return (self.start_date and self.end_date and 
-                self.start_date <= now <= self.end_date)
-
 
 class ThreadContractAssignment(models.Model):
     thread = models.ForeignKey(
